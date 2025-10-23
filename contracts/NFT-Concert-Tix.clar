@@ -1,6 +1,3 @@
-;; NFT-Based Virtual Concert Ticketing Smart Contract
-;; Implements SIP-009 NFT standard with anti-scalping mechanisms
-
 (define-non-fungible-token concert-ticket uint)
 
 (define-constant contract-owner tx-sender)
@@ -14,6 +11,7 @@
 (define-constant err-transfer-failed (err u107))
 (define-constant err-unauthorized (err u108))
 (define-constant err-event-ended (err u109))
+(define-constant err-checked-in (err u110))
 (define-constant max-scalping-price u500)
 (define-constant default-royalty-rate u5)
 (define-constant max-royalty-rate u25)
@@ -29,6 +27,8 @@
 (define-map event-ticket-count uint uint)
 (define-map authorized-minters principal bool)
 (define-map burned-tokens uint bool)
+(define-map token-event uint uint)
+(define-map checked-in uint bool)
 
 (define-public (get-last-token-id)
   (ok (var-get last-token-id)))
@@ -44,7 +44,8 @@
     (asserts! (is-eq tx-sender sender) err-not-token-owner)
     (asserts! (is-eq (some sender) (nft-get-owner? concert-ticket token-id)) err-not-token-owner)
     (asserts! (not (default-to false (map-get? burned-tokens token-id))) err-not-found)
-    (let ((event-id (get-event-id-from-token token-id))
+    (asserts! (not (default-to false (map-get? checked-in token-id))) err-checked-in)
+    (let ((event-id (unwrap! (get-event-id-from-token token-id) err-not-found))
           (event-info (unwrap! (map-get? event-details event-id) err-not-found))
           (royalty-amount (/ (* (default-to u0 (map-get? token-prices token-id)) (get royalty-rate event-info)) u100))
           (artist (get artist event-info)))
@@ -58,7 +59,6 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (asserts! (<= royalty-rate max-royalty-rate) err-invalid-royalty)
-    (asserts! (> event-date (default-to u0 (get-stacks-block-info? time (- stacks-block-height u1)))) err-event-ended)
     (map-set event-details event-id {artist: tx-sender, venue: venue, event-date: event-date, max-tickets: max-tickets, base-price: base-price, royalty-rate: royalty-rate})
     (map-set event-ticket-count event-id u0)
     (ok event-id)))
@@ -72,8 +72,9 @@
     (try! (nft-mint? concert-ticket new-token-id recipient))
     (map-set token-uris new-token-id token-uri)
     (map-set token-prices new-token-id (get base-price event-info))
-    (map-set token-purchase-blocks new-token-id stacks-block-height)
+(map-set token-purchase-blocks new-token-id u0)
     (map-set event-ticket-count event-id (+ current-count u1))
+    (map-set token-event new-token-id event-id)
     (var-set last-token-id new-token-id)
     (ok new-token-id)))
 
@@ -87,13 +88,14 @@
 (define-public (buy-ticket (token-id uint) (max-price uint))
   (let ((owner (unwrap! (nft-get-owner? concert-ticket token-id) err-not-found))
         (price (default-to u0 (map-get? token-prices token-id)))
-        (event-id (get-event-id-from-token token-id))
+        (event-id (unwrap! (get-event-id-from-token token-id) err-not-found))
         (event-info (unwrap! (map-get? event-details event-id) err-not-found))
         (base-price (get base-price event-info))
         (royalty-amount (/ (* price (get royalty-rate event-info)) u100))
         (seller-amount (- price royalty-amount))
         (artist (get artist event-info)))
     (asserts! (not (default-to false (map-get? burned-tokens token-id))) err-not-found)
+    (asserts! (not (default-to false (map-get? checked-in token-id))) err-checked-in)
     (asserts! (<= price max-price) err-invalid-price)
     (if (> price (* base-price max-scalping-price))
         (try! (burn-scalped-ticket token-id))
@@ -108,7 +110,7 @@
 (define-public (burn-scalped-ticket (token-id uint))
   (let ((owner (unwrap! (nft-get-owner? concert-ticket token-id) err-not-found))
         (price (default-to u0 (map-get? token-prices token-id)))
-        (event-id (get-event-id-from-token token-id))
+        (event-id (unwrap! (get-event-id-from-token token-id) err-not-found))
         (event-info (unwrap! (map-get? event-details event-id) err-not-found))
         (base-price (get base-price event-info))
         (resale-count (default-to u0 (map-get? token-resale-count token-id))))
@@ -127,6 +129,16 @@
   (begin
     (asserts! (is-eq tx-sender contract-owner) err-owner-only)
     (map-delete authorized-minters minter)
+    (ok true)))
+
+(define-public (check-in (token-id uint))
+  (let ((owner (unwrap! (nft-get-owner? concert-ticket token-id) err-not-found))
+        (event-id (unwrap! (get-event-id-from-token token-id) err-not-found))
+        (event-info (unwrap! (map-get? event-details event-id) err-not-found))
+        (artist (get artist event-info)))
+    (asserts! (or (is-eq tx-sender contract-owner) (is-eq tx-sender artist)) err-unauthorized)
+    (asserts! (not (default-to false (map-get? checked-in token-id))) err-checked-in)
+    (map-set checked-in token-id true)
     (ok true)))
 
 (define-read-only (get-token-price (token-id uint))
@@ -150,5 +162,8 @@
 (define-read-only (is-authorized-minter (principal principal))
   (default-to false (map-get? authorized-minters principal)))
 
-(define-private (get-event-id-from-token (token-id uint))
-  (/ token-id u1000))
+(define-read-only (is-checked-in (token-id uint))
+  (default-to false (map-get? checked-in token-id)))
+
+(define-read-only (get-event-id-from-token (token-id uint))
+  (map-get? token-event token-id))
