@@ -12,6 +12,7 @@
 (define-constant err-unauthorized (err u108))
 (define-constant err-event-ended (err u109))
 (define-constant err-checked-in (err u110))
+(define-constant err-cannot-gift-self (err u111))
 (define-constant max-scalping-price u500)
 (define-constant default-royalty-rate u5)
 (define-constant max-royalty-rate u25)
@@ -29,6 +30,7 @@
 (define-map burned-tokens uint bool)
 (define-map token-event uint uint)
 (define-map checked-in uint bool)
+(define-map gift-messages uint (optional (string-ascii 200)))
 
 (define-public (get-last-token-id)
   (ok (var-get last-token-id)))
@@ -167,6 +169,19 @@
 
 (define-read-only (get-event-id-from-token (token-id uint))
   (map-get? token-event token-id))
+
+(define-read-only (get-gift-message (token-id uint))
+  (map-get? gift-messages token-id))
+
+(define-public (gift-ticket (token-id uint) (recipient principal) (message (optional (string-ascii 200))))
+  (let ((owner (unwrap! (nft-get-owner? concert-ticket token-id) err-not-found)))
+    (asserts! (is-eq tx-sender owner) err-not-token-owner)
+    (asserts! (not (is-eq tx-sender recipient)) err-cannot-gift-self)
+    (asserts! (not (default-to false (map-get? burned-tokens token-id))) err-not-found)
+    (asserts! (not (default-to false (map-get? checked-in token-id))) err-checked-in)
+    (map-set gift-messages token-id message)
+    (try! (nft-transfer? concert-ticket token-id owner recipient))
+    (ok true)))
 
 (define-public (buy-primary-ticket (event-id uint) (token-uri (optional (string-ascii 256))))
   (let ((event-info (unwrap! (map-get? event-details event-id) err-not-found))
